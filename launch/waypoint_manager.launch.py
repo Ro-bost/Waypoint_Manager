@@ -23,6 +23,11 @@ def generate_launch_description():
             description="YAML with map-frame coordinates for vertices 1-4.",
         ),
         DeclareLaunchArgument("auto_start", default_value="true"),
+        DeclareLaunchArgument(
+            "home_vertex",
+            default_value="1",
+            description="Initial logical vertex where the robot starts.",
+        ),
         DeclareLaunchArgument("odometry_origin_vertex", default_value="1"),
         DeclareLaunchArgument(
             "sync_odometry_origin_on_vertex_set",
@@ -33,6 +38,11 @@ def generate_launch_description():
             "way_point_topic",
             default_value="/waypoint_manager/target_waypoint",
             description="Waypoint_Manager target topic consumed by run_relative_waypoint_sequence.py.",
+        ),
+        DeclareLaunchArgument(
+            "waypoint_reached_topic",
+            default_value="/waypoint_manager/waypoint_reached",
+            description="Int32 completion signal topic; publish data=1 to advance to the next waypoint.",
         ),
         DeclareLaunchArgument(
             "speed_topic",
@@ -48,6 +58,7 @@ def generate_launch_description():
                 "legs_dir": LaunchConfiguration("legs_dir"),
                 "vertices_file": LaunchConfiguration("vertices_file"),
                 "auto_start": LaunchConfiguration("auto_start"),
+                "home_vertex": LaunchConfiguration("home_vertex"),
                 "odometry_origin_vertex": LaunchConfiguration(
                     "odometry_origin_vertex"
                 ),
@@ -58,6 +69,9 @@ def generate_launch_description():
                     "diagnostics_log_enabled"
                 ),
                 "way_point_topic": LaunchConfiguration("way_point_topic"),
+                "waypoint_reached_topic": LaunchConfiguration(
+                    "waypoint_reached_topic"
+                ),
                 "speed_topic": LaunchConfiguration("speed_topic"),
             }],
         ),

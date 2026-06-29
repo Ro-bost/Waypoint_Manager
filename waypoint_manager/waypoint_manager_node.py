@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -47,6 +48,9 @@ class WaypointManagerNode(Node):
 
         # autonomy_stack_go2 (https://github.com/jizhang-cmu/autonomy_stack_go2)
         self.declare_parameter("way_point_topic", "/waypoint_manager/target_waypoint")
+        self.declare_parameter(
+            "waypoint_reached_topic", "/waypoint_manager/waypoint_reached"
+        )
         self.declare_parameter("speed_topic", "/speed")
         self.declare_parameter("navigation_speed", 1.0)
         self.declare_parameter("waypoint_publish_rate", 5.0)
@@ -77,7 +81,9 @@ class WaypointManagerNode(Node):
         self._last_statuses: list = []
         self._current_vertex = self._home_vertex
         self._route: List[int] = [self._home_vertex]
+        self._route_target_vertex: Optional[int] = None
         self._waypoints: List[PoseStamped] = []
+        self._active_waypoint_index = 0
 
         self._diagnostics_logger: Optional[DiagnosticsTxtLogger] = None
         if bool(self.get_parameter("diagnostics_log_enabled").value):
@@ -100,6 +106,9 @@ class WaypointManagerNode(Node):
         )
 
         way_point_topic = str(self.get_parameter("way_point_topic").value)
+        waypoint_reached_topic = str(
+            self.get_parameter("waypoint_reached_topic").value
+        )
         speed_topic = str(self.get_parameter("speed_topic").value)
         self._way_point_pub = self.create_publisher(PointStamped, way_point_topic, 5)
         self._speed_pub = self.create_publisher(Float32, speed_topic, 5)
@@ -108,6 +117,9 @@ class WaypointManagerNode(Node):
         self._current_vertex_pub = self.create_publisher(Int32, "~/current_vertex", 10)
         self._marker_pub = self.create_publisher(MarkerArray, "~/markers", marker_qos)
         self._queue_pub = self.create_publisher(Int32, "~/waypoint_count", 10)
+        self._active_waypoint_index_pub = self.create_publisher(
+            Int32, "~/active_waypoint_index", 10
+        )
 
         self.create_service(Trigger, "~/start", self._on_start)
         self.create_service(Trigger, "~/cancel", self._on_cancel)
@@ -119,6 +131,9 @@ class WaypointManagerNode(Node):
         self.create_subscription(
             Int32, "~/set_odometry_origin", self._on_set_odometry_origin, 10
         )
+        self.create_subscription(
+            Int32, waypoint_reached_topic, self._on_waypoint_reached, 10
+        )
 
         period = 1.0 / publish_rate if publish_rate > 0.0 else 0.2
         self.create_timer(period, self._navigation_tick)
@@ -127,6 +142,7 @@ class WaypointManagerNode(Node):
         self.get_logger().info(
             f"Waypoint manager ready (autonomy_stack_go2). "
             f"diagnostics={diagnostics_topic}, way_point={way_point_topic}, "
+            f"waypoint_reached={waypoint_reached_topic}, "
             f"legs_dir={self._legs_dir}"
         )
         if self._diagnostics_logger is not None:
@@ -252,9 +268,55 @@ class WaypointManagerNode(Node):
         if self._auto_start:
             self._try_start_next_hop(self._last_statuses)
 
+    def _on_waypoint_reached(self, msg: Int32) -> None:
+        if int(msg.data) != 1:
+            return
+
+        if not self._waypoints:
+            self.get_logger().debug(
+                "Waypoint reached signal ignored; no active waypoint target.",
+                throttle_duration_sec=5.0,
+            )
+            return
+
+        if self._active_waypoint_index + 1 < len(self._waypoints):
+            self._active_waypoint_index += 1
+            self._publish_active_waypoint_index()
+            self._publish_markers()
+            self._publish_active_waypoint()
+            self.get_logger().info(
+                f"Advanced to waypoint {self._active_waypoint_index + 1}/"
+                f"{len(self._waypoints)} for hop "
+                f"{' -> '.join(str(v) for v in self._route)}"
+            )
+            return
+
+        completed = len(self._waypoints)
+        self._waypoints = []
+        self._active_waypoint_index = 0
+        if self._route_target_vertex is not None:
+            self._current_vertex = self._route_target_vertex
+            self._route_target_vertex = None
+            self._publish_current_vertex()
+        self._publish_markers()
+        self._publish_waypoint_count()
+        self._publish_active_waypoint_index()
+        self.get_logger().info(
+            f"Completed hop {' -> '.join(str(v) for v in self._route)} "
+            f"after {completed} waypoint(s)."
+        )
+
     def _try_start_next_hop(self, statuses: list) -> bool:
         target = get_target_vertex_from_statuses(statuses)
         if target is None:
+            return False
+
+        if self._waypoints:
+            self.get_logger().debug(
+                f"Ignoring target vertex {target}; active hop "
+                f"{' -> '.join(str(v) for v in self._route)} is still running.",
+                throttle_duration_sec=10.0,
+            )
             return False
 
         if target == self._current_vertex:
@@ -274,12 +336,12 @@ class WaypointManagerNode(Node):
         if not self._load_route_waypoints():
             return False
 
-        self._current_vertex = target
-        self._publish_current_vertex()
+        self._route_target_vertex = target
         ox, oy = self._autonomy_origin_xy()
         self.get_logger().info(
             f"Commanding hop: {' -> '.join(str(v) for v in self._route)} "
-            f"(logical current vertex now {self._current_vertex}, "
+            f"(logical current vertex {self._current_vertex}, "
+            f"target vertex {self._route_target_vertex}, "
             f"levels={self._device_levels}, "
             f"autonomy origin vertex {self._odometry_origin_vertex} "
             f"offset=({ox:.3f}, {oy:.3f}))"
@@ -290,14 +352,14 @@ class WaypointManagerNode(Node):
         if not self._waypoints:
             return
 
-        self._publish_active_waypoint()
         self._publish_speed()
 
     def _publish_active_waypoint(self) -> None:
         if not self._waypoints:
             return
 
-        wp = self._waypoints[0]
+        wp = self._waypoints[self._active_waypoint_index]
+        origin_x, origin_y = self._autonomy_origin_xy()
         wp_x, wp_y = self._map_to_autonomy_xy(
             wp.pose.position.x, wp.pose.position.y
         )
@@ -308,6 +370,13 @@ class WaypointManagerNode(Node):
         msg.point.y = wp_y
         msg.point.z = wp.pose.position.z
         self._way_point_pub.publish(msg)
+        self.get_logger().info(
+            f"Published waypoint {self._active_waypoint_index + 1}/"
+            f"{len(self._waypoints)}: "
+            f"map=({wp.pose.position.x:.3f}, {wp.pose.position.y:.3f}), "
+            f"origin=({origin_x:.3f}, {origin_y:.3f}), "
+            f"target=({wp_x:.3f}, {wp_y:.3f}, {msg.point.z:.3f})"
+        )
 
     def _publish_speed(self) -> None:
         speed = Float32()
@@ -318,8 +387,11 @@ class WaypointManagerNode(Node):
         pairs = route_to_leg_pairs(self._route)
         if not pairs:
             self._waypoints = []
+            self._route_target_vertex = None
+            self._active_waypoint_index = 0
             self._publish_markers()
             self._publish_waypoint_count()
+            self._publish_active_waypoint_index()
             return False
 
         try:
@@ -329,14 +401,22 @@ class WaypointManagerNode(Node):
         except (FileNotFoundError, ValueError, RuntimeError) as exc:
             self.get_logger().error(f"Failed to load route waypoints: {exc}")
             self._waypoints = []
+            self._route_target_vertex = None
+            self._active_waypoint_index = 0
             self._publish_markers()
             self._publish_waypoint_count()
+            self._publish_active_waypoint_index()
             return False
 
         self._waypoints = poses
+        self._active_waypoint_index = 0
+        if len(self._route) >= 2:
+            self._route_target_vertex = int(self._route[-1])
         self._frame_id = frame_id
         self._publish_markers()
         self._publish_waypoint_count()
+        self._publish_active_waypoint_index()
+        self._publish_active_waypoint()
         self.get_logger().info(
             f"Loaded {len(self._waypoints)} waypoint(s) for hop "
             f"{' -> '.join(str(v) for v in self._route)}"
@@ -363,8 +443,11 @@ class WaypointManagerNode(Node):
             response.message = "No active waypoint target."
             return response
         self._waypoints = []
+        self._route_target_vertex = None
+        self._active_waypoint_index = 0
         self._publish_markers()
         self._publish_waypoint_count()
+        self._publish_active_waypoint_index()
         response.success = True
         response.message = "Waypoint target cancelled."
         return response
@@ -394,6 +477,11 @@ class WaypointManagerNode(Node):
         msg.data = len(self._waypoints)
         self._queue_pub.publish(msg)
 
+    def _publish_active_waypoint_index(self) -> None:
+        msg = Int32()
+        msg.data = int(self._active_waypoint_index) if self._waypoints else -1
+        self._active_waypoint_index_pub.publish(msg)
+
     def _publish_markers(self) -> None:
         markers = MarkerArray()
         for idx, wp in enumerate(self._waypoints):
@@ -407,15 +495,20 @@ class WaypointManagerNode(Node):
             marker.id = idx
             marker.type = Marker.ARROW
             marker.action = Marker.ADD
-            marker.pose = wp.pose
+            marker.pose = deepcopy(wp.pose)
             marker.pose.position.x = wp_x
             marker.pose.position.y = wp_y
             marker.scale.x = 0.45
             marker.scale.y = 0.08
             marker.scale.z = 0.08
-            marker.color.r = 0.95
-            marker.color.g = 0.55
-            marker.color.b = 0.1
+            if idx == self._active_waypoint_index:
+                marker.color.r = 0.1
+                marker.color.g = 0.75
+                marker.color.b = 0.25
+            else:
+                marker.color.r = 0.95
+                marker.color.g = 0.55
+                marker.color.b = 0.1
             marker.color.a = 0.95
             markers.markers.append(marker)
 

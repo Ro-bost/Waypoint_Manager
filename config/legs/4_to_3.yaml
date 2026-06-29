@@ -1,6 +1,12 @@
 # Placeholder leg: vertex 4 -> vertex 3 (right edge)
 frame_id: map
 waypoints:
-  - x: 0.0
-    y: 0.0
+  - x: 3.0
+    y: 1.0
+    yaw: 0.0
+  - x: 3.0
+    y: 2.0
+    yaw: 0.0
+  - x: 3.0
+    y: 3.0
     yaw: 0.0

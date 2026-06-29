@@ -129,8 +129,11 @@ def load_leg_file(path: Path, default_frame_id: str) -> Tuple[str, List[PoseStam
     if yaml is None:
         raise RuntimeError("PyYAML is not installed")
 
-    with path.open("r", encoding="utf-8") as handle:
-        data = yaml.safe_load(handle)
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            data = yaml.safe_load(handle)
+    except yaml.YAMLError as exc:
+        raise ValueError(f"Invalid YAML syntax in {path}: {exc}") from exc
 
     if not isinstance(data, dict):
         raise ValueError(f"Leg file must be a YAML mapping: {path}")
@@ -184,8 +187,11 @@ def load_vertex_positions(path: Path) -> Tuple[str, Dict[int, Tuple[float, float
     if yaml is None:
         raise RuntimeError("PyYAML is not installed")
 
-    with path.open("r", encoding="utf-8") as handle:
-        data = yaml.safe_load(handle)
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            data = yaml.safe_load(handle)
+    except yaml.YAMLError as exc:
+        raise ValueError(f"Invalid YAML syntax in {path}: {exc}") from exc
 
     if not isinstance(data, dict):
         raise ValueError(f"Vertices file must be a YAML mapping: {path}")
