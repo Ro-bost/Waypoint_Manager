@@ -4,8 +4,8 @@
 #   |          |
 #   2 -------- 3
 #
-# autonomy_stack_go2 zeros odometry at stack startup. waypoint_manager subtracts
-# the odometry-origin vertex position so /way_point matches /state_estimation.
+# autonomy_stack_go2 uses the stack startup pose as its local origin.
+# waypoint_manager subtracts that origin vertex position before publishing.
 frame_id: map
 vertices:
   1:

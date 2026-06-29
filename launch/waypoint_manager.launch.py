@@ -39,11 +39,6 @@ def generate_launch_description():
             default_value="/speed",
             description="autonomy_stack_go2 speed topic.",
         ),
-        DeclareLaunchArgument(
-            "state_estimation_topic",
-            default_value="/state_estimation",
-            description="autonomy_stack_go2 odometry topic.",
-        ),
         Node(
             package="waypoint_manager",
             executable="waypoint_manager_node",
@@ -64,9 +59,6 @@ def generate_launch_description():
                 ),
                 "way_point_topic": LaunchConfiguration("way_point_topic"),
                 "speed_topic": LaunchConfiguration("speed_topic"),
-                "state_estimation_topic": LaunchConfiguration(
-                    "state_estimation_topic"
-                ),
             }],
         ),
     ])

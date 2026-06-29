@@ -1,17 +1,14 @@
 #!/usr/bin/env python3
-"""Factory diagnostics -> leg YAMLs -> autonomy_stack_go2 /way_point navigation."""
+"""Factory diagnostics -> leg YAMLs -> autonomy_stack_go2 /way_point target."""
 
 from __future__ import annotations
 
-import math
-from enum import Enum
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import rclpy
 from diagnostic_msgs.msg import DiagnosticArray
 from geometry_msgs.msg import PointStamped, PoseStamped
-from nav_msgs.msg import Odometry
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from std_msgs.msg import Float32, Int32, Int32MultiArray
@@ -33,13 +30,8 @@ from waypoint_manager.leg_loader import (
 )
 
 
-class NavState(Enum):
-    IDLE = "idle"
-    NAVIGATING = "navigating"
-
-
 class WaypointManagerNode(Node):
-    """ICROS diagnostics-driven waypoint manager for autonomy_stack_go2."""
+    """ICROS diagnostics-driven target publisher for autonomy_stack_go2."""
 
     def __init__(self) -> None:
         super().__init__("waypoint_manager")
@@ -55,11 +47,8 @@ class WaypointManagerNode(Node):
 
         # autonomy_stack_go2 (https://github.com/jizhang-cmu/autonomy_stack_go2)
         self.declare_parameter("way_point_topic", "/waypoint_manager/target_waypoint")
-        self.declare_parameter("state_estimation_topic", "/state_estimation")
         self.declare_parameter("speed_topic", "/speed")
         self.declare_parameter("navigation_speed", 1.0)
-        self.declare_parameter("waypoint_xy_radius", 0.5)
-        self.declare_parameter("waypoint_z_bound", 5.0)
         self.declare_parameter("waypoint_publish_rate", 5.0)
         self.declare_parameter("diagnostics_log_enabled", True)
         self.declare_parameter(
@@ -81,24 +70,14 @@ class WaypointManagerNode(Node):
         self._vertex_positions: Dict[int, Tuple[float, float]] = {}
         self._load_vertex_config()
 
-        self._waypoint_xy_radius = float(self.get_parameter("waypoint_xy_radius").value)
-        self._waypoint_z_bound = float(self.get_parameter("waypoint_z_bound").value)
         self._navigation_speed = float(self.get_parameter("navigation_speed").value)
         publish_rate = float(self.get_parameter("waypoint_publish_rate").value)
 
         self._device_levels: Dict[str, int] = {name: 0 for name in DEVICE_NAMES}
         self._last_statuses: list = []
-        self._nav_state = NavState.IDLE
         self._current_vertex = self._home_vertex
-        self._mission_target: Optional[int] = None
         self._route: List[int] = [self._home_vertex]
         self._waypoints: List[PoseStamped] = []
-        self._wp_index = 0
-
-        self._vehicle_x = 0.0
-        self._vehicle_y = 0.0
-        self._vehicle_z = 0.0
-        self._have_pose = False
 
         self._diagnostics_logger: Optional[DiagnosticsTxtLogger] = None
         if bool(self.get_parameter("diagnostics_log_enabled").value):
@@ -120,9 +99,6 @@ class WaypointManagerNode(Node):
             DiagnosticArray, diagnostics_topic, self._on_diagnostics, diag_qos
         )
 
-        odom_topic = str(self.get_parameter("state_estimation_topic").value)
-        self.create_subscription(Odometry, odom_topic, self._on_odometry, 10)
-
         way_point_topic = str(self.get_parameter("way_point_topic").value)
         speed_topic = str(self.get_parameter("speed_topic").value)
         self._way_point_pub = self.create_publisher(PointStamped, way_point_topic, 5)
@@ -130,7 +106,6 @@ class WaypointManagerNode(Node):
 
         self._route_pub = self.create_publisher(Int32MultiArray, "~/route", 10)
         self._current_vertex_pub = self.create_publisher(Int32, "~/current_vertex", 10)
-        self._arrival_pub = self.create_publisher(Int32, "~/arrival", 10)
         self._marker_pub = self.create_publisher(MarkerArray, "~/markers", marker_qos)
         self._queue_pub = self.create_publisher(Int32, "~/waypoint_count", 10)
 
@@ -152,7 +127,7 @@ class WaypointManagerNode(Node):
         self.get_logger().info(
             f"Waypoint manager ready (autonomy_stack_go2). "
             f"diagnostics={diagnostics_topic}, way_point={way_point_topic}, "
-            f"odom={odom_topic}, legs_dir={self._legs_dir}"
+            f"legs_dir={self._legs_dir}"
         )
         if self._diagnostics_logger is not None:
             self.get_logger().info(
@@ -219,12 +194,6 @@ class WaypointManagerNode(Node):
         )
 
     def _on_set_current_vertex(self, msg: Int32) -> None:
-        if self._nav_state == NavState.NAVIGATING:
-            self.get_logger().warn(
-                "Cannot set current_vertex while navigating; cancel first."
-            )
-            return
-
         vertex = int(msg.data)
         if vertex not in self._vertex_positions:
             self.get_logger().error(f"Invalid current_vertex {vertex}; expected 1-4.")
@@ -250,18 +219,12 @@ class WaypointManagerNode(Node):
         self._odometry_origin_vertex = vertex
         ox, oy = self._autonomy_origin_xy()
         self.get_logger().info(
-            f"Odometry origin vertex set to {vertex}; "
+            f"Local origin vertex set to {vertex}; "
             f"map offset=({ox:.3f}, {oy:.3f}). "
             "Use after autonomy_stack_go2 restarts at that vertex."
         )
-        if self._nav_state == NavState.IDLE and self._waypoints:
+        if self._waypoints:
             self._publish_markers()
-
-    def _on_odometry(self, msg: Odometry) -> None:
-        self._vehicle_x = float(msg.pose.pose.position.x)
-        self._vehicle_y = float(msg.pose.pose.position.y)
-        self._vehicle_z = float(msg.pose.pose.position.z)
-        self._have_pose = True
 
     def _on_diagnostics(self, msg: DiagnosticArray) -> None:
         if self._diagnostics_logger is not None:
@@ -286,21 +249,10 @@ class WaypointManagerNode(Node):
 
         self._last_statuses = list(msg.status)
 
-        # Only start a new hop when idle (previous navigation finished).
-        if self._nav_state != NavState.IDLE:
-            self.get_logger().debug(
-                "Navigation in progress; diagnostics stored for after arrival.",
-                throttle_duration_sec=5.0,
-            )
-            return
-
         if self._auto_start:
             self._try_start_next_hop(self._last_statuses)
 
     def _try_start_next_hop(self, statuses: list) -> bool:
-        if self._nav_state != NavState.IDLE:
-            return False
-
         target = get_target_vertex_from_statuses(statuses)
         if target is None:
             return False
@@ -317,83 +269,35 @@ class WaypointManagerNode(Node):
             return False
 
         self._route = hop_route
-        self._mission_target = target
         self._publish_route()
 
         if not self._load_route_waypoints():
-            self._mission_target = None
             return False
 
-        self._wp_index = 0
-        self._nav_state = NavState.NAVIGATING
+        self._current_vertex = target
+        self._publish_current_vertex()
         ox, oy = self._autonomy_origin_xy()
         self.get_logger().info(
-            f"Starting hop: {' -> '.join(str(v) for v in self._route)} "
-            f"(from vertex {self._current_vertex}, levels={self._device_levels}, "
+            f"Commanding hop: {' -> '.join(str(v) for v in self._route)} "
+            f"(logical current vertex now {self._current_vertex}, "
+            f"levels={self._device_levels}, "
             f"autonomy origin vertex {self._odometry_origin_vertex} "
             f"offset=({ox:.3f}, {oy:.3f}))"
         )
         return True
 
     def _navigation_tick(self) -> None:
-        if self._nav_state != NavState.NAVIGATING or not self._waypoints:
-            return
-
-        if self._wp_index >= len(self._waypoints):
-            self._complete_hop()
+        if not self._waypoints:
             return
 
         self._publish_active_waypoint()
         self._publish_speed()
 
-        if not self._have_pose:
-            return
-
-        wp = self._waypoints[self._wp_index]
-        wp_x, wp_y = self._map_to_autonomy_xy(
-            wp.pose.position.x, wp.pose.position.y
-        )
-        dx = self._vehicle_x - wp_x
-        dy = self._vehicle_y - wp_y
-        dz = self._vehicle_z - wp.pose.position.z
-        dist_xy = math.hypot(dx, dy)
-
-        if dist_xy < self._waypoint_xy_radius and abs(dz) < self._waypoint_z_bound:
-            self.get_logger().info(
-                f"Reached leg waypoint {self._wp_index + 1}/{len(self._waypoints)} "
-                f"map=({wp.pose.position.x:.2f}, {wp.pose.position.y:.2f}) "
-                f"autonomy=({wp_x:.2f}, {wp_y:.2f})"
-            )
-            self._wp_index += 1
-            if self._wp_index >= len(self._waypoints):
-                self._complete_hop()
-
-    def _complete_hop(self) -> None:
-        if self._mission_target is not None:
-            self._current_vertex = self._mission_target
-            self._publish_current_vertex()
-
-            arrival = Int32()
-            arrival.data = int(self._current_vertex)
-            self._arrival_pub.publish(arrival)
-
-            self.get_logger().info(
-                f"Hop complete. Arrived at vertex {self._current_vertex}."
-            )
-
-        self._nav_state = NavState.IDLE
-        self._mission_target = None
-        self._wp_index = 0
-
-        # Process diagnostics that may have arrived during navigation.
-        if self._auto_start and self._last_statuses:
-            self._try_start_next_hop(self._last_statuses)
-
     def _publish_active_waypoint(self) -> None:
-        if self._wp_index >= len(self._waypoints):
+        if not self._waypoints:
             return
 
-        wp = self._waypoints[self._wp_index]
+        wp = self._waypoints[0]
         wp_x, wp_y = self._map_to_autonomy_xy(
             wp.pose.position.x, wp.pose.position.y
         )
@@ -440,43 +344,32 @@ class WaypointManagerNode(Node):
         return True
 
     def _on_start(self, _request: Trigger.Request, response: Trigger.Response) -> Trigger.Response:
-        if self._nav_state == NavState.NAVIGATING:
-            response.success = False
-            response.message = "Mission already running."
-            return response
-
         if self._last_statuses:
             started = self._try_start_next_hop(self._last_statuses)
         elif self._load_route_waypoints():
-            self._wp_index = 0
-            self._nav_state = NavState.NAVIGATING
             started = True
         else:
             started = False
 
         response.success = started
         response.message = (
-            "Navigation started." if started else "No hop available to start."
+            "Waypoint target started." if started else "No hop available to start."
         )
         return response
 
     def _on_cancel(self, _request: Trigger.Request, response: Trigger.Response) -> Trigger.Response:
-        if self._nav_state != NavState.NAVIGATING:
+        if not self._waypoints:
             response.success = False
-            response.message = "No active navigation."
+            response.message = "No active waypoint target."
             return response
-        self._nav_state = NavState.IDLE
-        self._mission_target = None
-        self._wp_index = 0
+        self._waypoints = []
+        self._publish_markers()
+        self._publish_waypoint_count()
         response.success = True
-        response.message = "Navigation cancelled."
+        response.message = "Waypoint target cancelled."
         return response
 
     def _on_reload(self, _request: Trigger.Request, response: Trigger.Response) -> Trigger.Response:
-        if self._nav_state == NavState.NAVIGATING:
-            response.success = False
-            response.message = "Navigation running."
-            return response
         ok = self._load_route_waypoints()
         response.success = ok
         response.message = (
