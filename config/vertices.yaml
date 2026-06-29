@@ -1,0 +1,26 @@
+# Map-frame vertex positions (same coordinates as leg YAML waypoints).
+# Layout:
+#   1 -------- 4
+#   |          |
+#   2 -------- 3
+#
+# autonomy_stack_go2 zeros odometry at stack startup. waypoint_manager subtracts
+# the odometry-origin vertex position so /way_point matches /state_estimation.
+frame_id: map
+vertices:
+  1:
+    x: 0.0
+    y: 0.0
+    yaw: 0.0
+  2:
+    x: 0.0
+    y: 0.0
+    yaw: 0.0
+  3:
+    x: 0.0
+    y: 0.0
+    yaw: 0.0
+  4:
+    x: 0.0
+    y: 0.0
+    yaw: 0.0

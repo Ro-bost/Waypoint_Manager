@@ -18,12 +18,16 @@ from std_msgs.msg import Float32, Int32, Int32MultiArray
 from std_srvs.srv import Trigger
 from visualization_msgs.msg import Marker, MarkerArray
 
+from waypoint_manager.diagnostics_logger import DiagnosticsTxtLogger
 from waypoint_manager.leg_loader import (
     DEVICE_NAMES,
+    autonomy_origin_for_vertex,
     build_hop_route,
     diagnostic_level_to_int,
     get_target_vertex_from_statuses,
     load_route_waypoints,
+    load_vertex_positions,
+    map_pose_to_autonomy_frame,
     parse_vertex_from_name,
     route_to_leg_pairs,
 )
@@ -42,8 +46,11 @@ class WaypointManagerNode(Node):
 
         self.declare_parameter("diagnostics_topic", "/factory/diagnostics")
         self.declare_parameter("legs_dir", "")
+        self.declare_parameter("vertices_file", "")
         self.declare_parameter("default_frame_id", "map")
         self.declare_parameter("home_vertex", 1)
+        self.declare_parameter("odometry_origin_vertex", 1)
+        self.declare_parameter("sync_odometry_origin_on_vertex_set", False)
         self.declare_parameter("auto_start", True)
 
         # autonomy_stack_go2 (https://github.com/jizhang-cmu/autonomy_stack_go2)
@@ -54,11 +61,25 @@ class WaypointManagerNode(Node):
         self.declare_parameter("waypoint_xy_radius", 0.5)
         self.declare_parameter("waypoint_z_bound", 5.0)
         self.declare_parameter("waypoint_publish_rate", 5.0)
+        self.declare_parameter("diagnostics_log_enabled", True)
+        self.declare_parameter(
+            "diagnostics_log_path",
+            str(Path.home() / "waypoint_manager" / "logs" / "diagnostics_log.txt"),
+        )
 
         self._frame_id = str(self.get_parameter("default_frame_id").value)
         self._home_vertex = int(self.get_parameter("home_vertex").value)
+        self._odometry_origin_vertex = int(
+            self.get_parameter("odometry_origin_vertex").value
+        )
+        self._sync_origin_on_vertex_set = bool(
+            self.get_parameter("sync_odometry_origin_on_vertex_set").value
+        )
         self._auto_start = bool(self.get_parameter("auto_start").value)
         self._legs_dir = self._resolve_legs_dir()
+        self._vertices_file = self._resolve_vertices_file()
+        self._vertex_positions: Dict[int, Tuple[float, float]] = {}
+        self._load_vertex_config()
 
         self._waypoint_xy_radius = float(self.get_parameter("waypoint_xy_radius").value)
         self._waypoint_z_bound = float(self.get_parameter("waypoint_z_bound").value)
@@ -78,6 +99,14 @@ class WaypointManagerNode(Node):
         self._vehicle_y = 0.0
         self._vehicle_z = 0.0
         self._have_pose = False
+
+        self._diagnostics_logger: Optional[DiagnosticsTxtLogger] = None
+        if bool(self.get_parameter("diagnostics_log_enabled").value):
+            log_path = Path(str(self.get_parameter("diagnostics_log_path").value)).expanduser()
+            try:
+                self._diagnostics_logger = DiagnosticsTxtLogger(log_path)
+            except OSError as exc:
+                self.get_logger().error(f"Failed to open diagnostics text log: {exc}")
 
         diag_qos = QoSProfile(
             depth=10,
@@ -109,6 +138,13 @@ class WaypointManagerNode(Node):
         self.create_service(Trigger, "~/cancel", self._on_cancel)
         self.create_service(Trigger, "~/reload", self._on_reload)
 
+        self.create_subscription(
+            Int32, "~/set_current_vertex", self._on_set_current_vertex, 10
+        )
+        self.create_subscription(
+            Int32, "~/set_odometry_origin", self._on_set_odometry_origin, 10
+        )
+
         period = 1.0 / publish_rate if publish_rate > 0.0 else 0.2
         self.create_timer(period, self._navigation_tick)
 
@@ -117,6 +153,15 @@ class WaypointManagerNode(Node):
             f"Waypoint manager ready (autonomy_stack_go2). "
             f"diagnostics={diagnostics_topic}, way_point={way_point_topic}, "
             f"odom={odom_topic}, legs_dir={self._legs_dir}"
+        )
+        if self._diagnostics_logger is not None:
+            self.get_logger().info(
+                f"Diagnostics text log: {self._diagnostics_logger.path}"
+            )
+        ox, oy = self._autonomy_origin_xy()
+        self.get_logger().info(
+            f"Waypoint frame: map -> autonomy via vertex "
+            f"{self._odometry_origin_vertex} offset=({ox:.3f}, {oy:.3f})"
         )
 
     def _resolve_legs_dir(self) -> Path:
@@ -132,6 +177,86 @@ class WaypointManagerNode(Node):
         except Exception:
             return Path(__file__).resolve().parent.parent / "config" / "legs"
 
+    def _resolve_vertices_file(self) -> Path:
+        vertices_param = str(self.get_parameter("vertices_file").value).strip()
+        if vertices_param:
+            return Path(vertices_param).expanduser()
+
+        try:
+            from ament_index_python.packages import get_package_share_directory
+
+            share = get_package_share_directory("waypoint_manager")
+            return Path(share) / "config" / "vertices.yaml"
+        except Exception:
+            return Path(__file__).resolve().parent.parent / "config" / "vertices.yaml"
+
+    def _load_vertex_config(self) -> None:
+        try:
+            frame_id, positions = load_vertex_positions(self._vertices_file)
+            self._vertex_positions = positions
+            if frame_id:
+                self._frame_id = frame_id
+        except (OSError, ValueError, RuntimeError, KeyError) as exc:
+            self.get_logger().error(
+                f"Failed to load vertices from {self._vertices_file}: {exc}"
+            )
+            self._vertex_positions = {}
+
+    def _autonomy_origin_xy(self) -> Tuple[float, float]:
+        if not self._vertex_positions:
+            return 0.0, 0.0
+        try:
+            return autonomy_origin_for_vertex(
+                self._vertex_positions, self._odometry_origin_vertex
+            )
+        except KeyError:
+            return 0.0, 0.0
+
+    def _map_to_autonomy_xy(self, map_x: float, map_y: float) -> Tuple[float, float]:
+        origin_x, origin_y = self._autonomy_origin_xy()
+        return map_pose_to_autonomy_frame(
+            map_x, map_y, origin_x=origin_x, origin_y=origin_y
+        )
+
+    def _on_set_current_vertex(self, msg: Int32) -> None:
+        if self._nav_state == NavState.NAVIGATING:
+            self.get_logger().warn(
+                "Cannot set current_vertex while navigating; cancel first."
+            )
+            return
+
+        vertex = int(msg.data)
+        if vertex not in self._vertex_positions:
+            self.get_logger().error(f"Invalid current_vertex {vertex}; expected 1-4.")
+            return
+
+        self._current_vertex = vertex
+        self._publish_current_vertex()
+        self.get_logger().info(f"Current vertex set to {vertex} (skip/manual).")
+
+        if self._sync_origin_on_vertex_set:
+            self._set_odometry_origin_vertex(vertex)
+
+    def _on_set_odometry_origin(self, msg: Int32) -> None:
+        self._set_odometry_origin_vertex(int(msg.data))
+
+    def _set_odometry_origin_vertex(self, vertex: int) -> None:
+        if vertex not in self._vertex_positions:
+            self.get_logger().error(
+                f"Invalid odometry_origin_vertex {vertex}; expected 1-4."
+            )
+            return
+
+        self._odometry_origin_vertex = vertex
+        ox, oy = self._autonomy_origin_xy()
+        self.get_logger().info(
+            f"Odometry origin vertex set to {vertex}; "
+            f"map offset=({ox:.3f}, {oy:.3f}). "
+            "Use after autonomy_stack_go2 restarts at that vertex."
+        )
+        if self._nav_state == NavState.IDLE and self._waypoints:
+            self._publish_markers()
+
     def _on_odometry(self, msg: Odometry) -> None:
         self._vehicle_x = float(msg.pose.pose.position.x)
         self._vehicle_y = float(msg.pose.pose.position.y)
@@ -139,6 +264,15 @@ class WaypointManagerNode(Node):
         self._have_pose = True
 
     def _on_diagnostics(self, msg: DiagnosticArray) -> None:
+        if self._diagnostics_logger is not None:
+            stamp = msg.header.stamp
+            if stamp.sec or stamp.nanosec:
+                timestamp = f"{stamp.sec}.{stamp.nanosec:09d}"
+            else:
+                timestamp = self.get_clock().now().to_msg()
+                timestamp = f"{timestamp.sec}.{timestamp.nanosec:09d}"
+            self._diagnostics_logger.log_array(msg, timestamp)
+
         for status in msg.status:
             level = diagnostic_level_to_int(status.level)
             if status.name in self._device_levels:
@@ -192,9 +326,12 @@ class WaypointManagerNode(Node):
 
         self._wp_index = 0
         self._nav_state = NavState.NAVIGATING
+        ox, oy = self._autonomy_origin_xy()
         self.get_logger().info(
             f"Starting hop: {' -> '.join(str(v) for v in self._route)} "
-            f"(from vertex {self._current_vertex}, levels={self._device_levels})"
+            f"(from vertex {self._current_vertex}, levels={self._device_levels}, "
+            f"autonomy origin vertex {self._odometry_origin_vertex} "
+            f"offset=({ox:.3f}, {oy:.3f}))"
         )
         return True
 
@@ -213,15 +350,19 @@ class WaypointManagerNode(Node):
             return
 
         wp = self._waypoints[self._wp_index]
-        dx = self._vehicle_x - wp.pose.position.x
-        dy = self._vehicle_y - wp.pose.position.y
+        wp_x, wp_y = self._map_to_autonomy_xy(
+            wp.pose.position.x, wp.pose.position.y
+        )
+        dx = self._vehicle_x - wp_x
+        dy = self._vehicle_y - wp_y
         dz = self._vehicle_z - wp.pose.position.z
         dist_xy = math.hypot(dx, dy)
 
         if dist_xy < self._waypoint_xy_radius and abs(dz) < self._waypoint_z_bound:
             self.get_logger().info(
-                f"Reached leg waypoint {_wp_index + 1}/{len(self._waypoints)} "
-                f"({wp.pose.position.x:.2f}, {wp.pose.position.y:.2f})"
+                f"Reached leg waypoint {self._wp_index + 1}/{len(self._waypoints)} "
+                f"map=({wp.pose.position.x:.2f}, {wp.pose.position.y:.2f}) "
+                f"autonomy=({wp_x:.2f}, {wp_y:.2f})"
             )
             self._wp_index += 1
             if self._wp_index >= len(self._waypoints):
@@ -253,11 +394,14 @@ class WaypointManagerNode(Node):
             return
 
         wp = self._waypoints[self._wp_index]
+        wp_x, wp_y = self._map_to_autonomy_xy(
+            wp.pose.position.x, wp.pose.position.y
+        )
         msg = PointStamped()
         msg.header.stamp = self.get_clock().now().to_msg()
         msg.header.frame_id = wp.header.frame_id or self._frame_id
-        msg.point.x = wp.pose.position.x
-        msg.point.y = wp.pose.position.y
+        msg.point.x = wp_x
+        msg.point.y = wp_y
         msg.point.z = wp.pose.position.z
         self._way_point_pub.publish(msg)
 
@@ -360,6 +504,9 @@ class WaypointManagerNode(Node):
     def _publish_markers(self) -> None:
         markers = MarkerArray()
         for idx, wp in enumerate(self._waypoints):
+            wp_x, wp_y = self._map_to_autonomy_xy(
+                wp.pose.position.x, wp.pose.position.y
+            )
             marker = Marker()
             marker.header.frame_id = wp.header.frame_id or self._frame_id
             marker.header.stamp = self.get_clock().now().to_msg()
@@ -368,6 +515,8 @@ class WaypointManagerNode(Node):
             marker.type = Marker.ARROW
             marker.action = Marker.ADD
             marker.pose = wp.pose
+            marker.pose.position.x = wp_x
+            marker.pose.position.y = wp_y
             marker.scale.x = 0.45
             marker.scale.y = 0.08
             marker.scale.z = 0.08
@@ -393,6 +542,8 @@ def main(args: Optional[List[str]] = None) -> None:
     except KeyboardInterrupt:
         pass
     finally:
+        if node._diagnostics_logger is not None:
+            node._diagnostics_logger.close()
         node.destroy_node()
         if rclpy.ok():
             rclpy.shutdown()

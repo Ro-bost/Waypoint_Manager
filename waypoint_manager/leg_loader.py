@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 import numbers
 from pathlib import Path
-from typing import Any, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from geometry_msgs.msg import PoseStamped, Quaternion
 
@@ -173,3 +173,56 @@ def load_route_waypoints(
         merged.extend(leg_poses)
 
     return frame_id, merged
+
+
+def load_vertex_positions(path: Path) -> Tuple[str, Dict[int, Tuple[float, float]]]:
+    """Load map-frame (x, y) for vertices 1-4 from config/vertices.yaml."""
+    if yaml is None:
+        raise RuntimeError("PyYAML is not installed")
+
+    with path.open("r", encoding="utf-8") as handle:
+        data = yaml.safe_load(handle)
+
+    if not isinstance(data, dict):
+        raise ValueError(f"Vertices file must be a YAML mapping: {path}")
+
+    frame_id = str(data.get("frame_id", "map"))
+    raw_vertices = data.get("vertices", {})
+    if not isinstance(raw_vertices, dict):
+        raise ValueError(f"'vertices' must be a mapping in {path}")
+
+    positions: Dict[int, Tuple[float, float]] = {}
+    for key, entry in raw_vertices.items():
+        vertex = int(key)
+        if not 1 <= vertex <= 4:
+            raise ValueError(f"Vertex id must be 1-4, got {vertex} in {path}")
+        if not isinstance(entry, dict):
+            raise ValueError(f"Vertex {vertex} entry must be a mapping in {path}")
+        positions[vertex] = (float(entry["x"]), float(entry["y"]))
+
+    for vertex in (1, 2, 3, 4):
+        if vertex not in positions:
+            raise ValueError(f"Missing vertex {vertex} in {path}")
+
+    return frame_id, positions
+
+
+def map_pose_to_autonomy_frame(
+    x: float,
+    y: float,
+    *,
+    origin_x: float,
+    origin_y: float,
+) -> Tuple[float, float]:
+    """Convert map-frame XY to autonomy_stack_go2 frame (startup vertex at 0,0)."""
+    return x - origin_x, y - origin_y
+
+
+def autonomy_origin_for_vertex(
+    vertex_positions: Mapping[int, Tuple[float, float]],
+    origin_vertex: int,
+) -> Tuple[float, float]:
+    """Return map (x, y) of the vertex used as autonomy odometry origin."""
+    if origin_vertex not in vertex_positions:
+        raise KeyError(f"Unknown origin vertex {origin_vertex}")
+    return vertex_positions[origin_vertex]

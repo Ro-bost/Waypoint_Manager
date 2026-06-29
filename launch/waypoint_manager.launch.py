@@ -8,10 +8,8 @@ from launch_ros.substitutions import FindPackageShare
 def generate_launch_description():
     pkg = FindPackageShare("waypoint_manager")
 
-    legs_dir = LaunchConfiguration("legs_dir")
-    auto_start = LaunchConfiguration("auto_start")
-
     default_legs = PathJoinSubstitution([pkg, "config", "legs"])
+    default_vertices = PathJoinSubstitution([pkg, "config", "vertices.yaml"])
 
     return LaunchDescription([
         DeclareLaunchArgument(
@@ -19,7 +17,18 @@ def generate_launch_description():
             default_value=default_legs,
             description="Directory containing {from}_to_{to}.yaml leg files.",
         ),
+        DeclareLaunchArgument(
+            "vertices_file",
+            default_value=default_vertices,
+            description="YAML with map-frame coordinates for vertices 1-4.",
+        ),
         DeclareLaunchArgument("auto_start", default_value="true"),
+        DeclareLaunchArgument("odometry_origin_vertex", default_value="1"),
+        DeclareLaunchArgument(
+            "sync_odometry_origin_on_vertex_set",
+            default_value="false",
+        ),
+        DeclareLaunchArgument("diagnostics_log_enabled", default_value="true"),
         DeclareLaunchArgument(
             "way_point_topic",
             default_value="/way_point",
@@ -36,10 +45,22 @@ def generate_launch_description():
             name="waypoint_manager",
             output="screen",
             parameters=[{
-                "legs_dir": legs_dir,
-                "auto_start": auto_start,
+                "legs_dir": LaunchConfiguration("legs_dir"),
+                "vertices_file": LaunchConfiguration("vertices_file"),
+                "auto_start": LaunchConfiguration("auto_start"),
+                "odometry_origin_vertex": LaunchConfiguration(
+                    "odometry_origin_vertex"
+                ),
+                "sync_odometry_origin_on_vertex_set": LaunchConfiguration(
+                    "sync_odometry_origin_on_vertex_set"
+                ),
+                "diagnostics_log_enabled": LaunchConfiguration(
+                    "diagnostics_log_enabled"
+                ),
                 "way_point_topic": LaunchConfiguration("way_point_topic"),
-                "state_estimation_topic": LaunchConfiguration("state_estimation_topic"),
+                "state_estimation_topic": LaunchConfiguration(
+                    "state_estimation_topic"
+                ),
             }],
         ),
     ])
