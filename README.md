@@ -32,8 +32,8 @@ ros2 launch waypoint_manager waypoint_manager.launch.py \
 ```
 
 After launch, normal operation does not require publishing `set_current_vertex`
-or `set_odometry_origin` for every command. `current_vertex` is updated after
-the last waypoint in a leg is reported reached.
+for every command. `current_vertex` is updated after the last waypoint in a leg
+is reported reached.
 
 For a command from vertex 1 to `device2`, the flow is:
 
@@ -52,8 +52,8 @@ For a command from vertex 1 to `device2`, the flow is:
 
 `/waypoint_manager/route`, `/waypoint_manager/current_vertex`, and
 `/waypoint_manager/active_waypoint_index` are status/debug topics. The lower
-navigation layer only needs `/waypoint_manager/target_waypoint`, `/speed`, and
-the completion signal `/waypoint_manager/waypoint_reached`.
+navigation layer only needs `/waypoint_manager/target_waypoint` and the
+completion signal `/waypoint_manager/waypoint_reached`.
 
 ## Real Robot Run Order (ROS2 Foxy / SSH)
 
@@ -136,25 +136,24 @@ new manager waypoint: frame=map, x=3.398, y=0.765, z=-0.002
 |------|-----------|------|-------------|
 | `/factory/diagnostics` | in | `diagnostic_msgs/msg/DiagnosticArray` | Factory device target |
 | `/waypoint_manager/target_waypoint` | out | `geometry_msgs/msg/PointStamped` | Target consumed by runner |
-| `/speed` | out | `std_msgs/msg/Float32` | Speed command value |
 | `/waypoint_manager/waypoint_reached` | in | `std_msgs/msg/Int32` | Publish `data: 1` when the lower layer reached the active waypoint |
 | `/waypoint_manager/route` | out | `std_msgs/msg/Int32MultiArray` | Current logical route, e.g. `[1, 2]` |
 | `/waypoint_manager/current_vertex` | out | `std_msgs/msg/Int32` | Manager-side logical vertex |
-| `/waypoint_manager/waypoint_count` | out | `std_msgs/msg/Int32` | Loaded waypoint count |
 | `/waypoint_manager/active_waypoint_index` | out | `std_msgs/msg/Int32` | Zero-based active waypoint index, or `-1` when idle |
-| `/waypoint_manager/markers` | out | `visualization_msgs/msg/MarkerArray` | RViz markers |
 | `/waypoint_manager/set_current_vertex` | in | `std_msgs/msg/Int32` | Manually set logical vertex |
-| `/waypoint_manager/set_odometry_origin` | in | `std_msgs/msg/Int32` | Set local-origin vertex for coordinate offset |
 
-`set_current_vertex` and `set_odometry_origin` are manual override topics. In
-normal startup, prefer launch parameters `home_vertex` and
-`odometry_origin_vertex`.
+`set_current_vertex` is a manual recovery topic for cases where the manager's
+logical current vertex no longer matches the robot's actual vertex. Set the
+coordinate origin at startup with the `odometry_origin_vertex` launch argument.
+
+The manager intentionally does not publish speed commands or RViz markers.
+Speed/motion control stays in the lower navigation layer, and waypoint_manager
+only publishes target points.
 
 ## Services
 
 | Service | Type | Description |
 |---------|------|-------------|
-| `/waypoint_manager/start` | `std_srvs/srv/Trigger` | Start from latest diagnostics |
 | `/waypoint_manager/cancel` | `std_srvs/srv/Trigger` | Stop publishing current target |
 | `/waypoint_manager/reload` | `std_srvs/srv/Trigger` | Reload current route YAML |
 

@@ -33,7 +33,9 @@ published_x = yaml_waypoint_x - vertices[odometry_origin_vertex].x
 published_y = yaml_waypoint_y - vertices[odometry_origin_vertex].y
 ```
 
-정상 운용에서는 명령을 보낼 때마다 `set_current_vertex`나 `set_odometry_origin`을 다시 보낼 필요가 없습니다. 중간에 target을 취소하거나 실제 로봇 위치와 manager 상태가 어긋난 경우에만 수동 보정용으로 사용합니다.
+정상 운용에서는 명령을 보낼 때마다 `set_current_vertex`를 다시 보낼 필요가 없습니다. 중간에 target을 취소하거나 실제 로봇 위치와 manager 상태가 어긋난 경우에만 수동 보정용으로 사용합니다. 좌표 보정 기준은 시작할 때 `odometry_origin_vertex` launch 파라미터로 정합니다.
+
+현재 waypoint_manager는 target waypoint만 발행합니다. `/speed`, RViz marker, waypoint count, 수동 `/start`, 실행 중 `/set_odometry_origin`은 제거되어 있으며 속도/실제 이동 제어는 아래 navigation layer가 담당합니다.
 
 ## 1. Waypoint 저장
 
@@ -218,7 +220,6 @@ timeout 5 ros2 topic echo /waypoint_manager/target_waypoint
 timeout 5 ros2 topic echo /way_point
 timeout 5 ros2 topic echo /waypoint_manager/active_waypoint_index
 timeout 5 ros2 topic echo /joy
-timeout 5 ros2 topic echo /speed
 ```
 
 `/waypoint_manager/target_waypoint`는 나오는데 `/way_point`가 안 나오면 runner가 안 떠 있거나 토픽명이 다릅니다.
@@ -319,4 +320,4 @@ ros2 launch waypoint_manager waypoint_manager.launch.py \
   odometry_origin_vertex:=2
 ```
 
-stack을 재시작하지 않았다면 `set_odometry_origin`을 바꾸지 마세요.
+stack을 재시작하지 않았다면 `odometry_origin_vertex` 기준을 바꾸지 마세요.

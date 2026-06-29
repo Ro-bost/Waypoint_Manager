@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-from copy import deepcopy
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -11,10 +10,9 @@ import rclpy
 from diagnostic_msgs.msg import DiagnosticArray
 from geometry_msgs.msg import PointStamped, PoseStamped
 from rclpy.node import Node
-from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
-from std_msgs.msg import Float32, Int32, Int32MultiArray
+from rclpy.qos import QoSProfile, ReliabilityPolicy
+from std_msgs.msg import Int32, Int32MultiArray
 from std_srvs.srv import Trigger
-from visualization_msgs.msg import Marker, MarkerArray
 
 from waypoint_manager.diagnostics_logger import DiagnosticsTxtLogger
 from waypoint_manager.leg_loader import (
@@ -43,17 +41,12 @@ class WaypointManagerNode(Node):
         self.declare_parameter("default_frame_id", "map")
         self.declare_parameter("home_vertex", 1)
         self.declare_parameter("odometry_origin_vertex", 1)
-        self.declare_parameter("sync_odometry_origin_on_vertex_set", False)
-        self.declare_parameter("auto_start", True)
 
         # autonomy_stack_go2 (https://github.com/jizhang-cmu/autonomy_stack_go2)
         self.declare_parameter("way_point_topic", "/waypoint_manager/target_waypoint")
         self.declare_parameter(
             "waypoint_reached_topic", "/waypoint_manager/waypoint_reached"
         )
-        self.declare_parameter("speed_topic", "/speed")
-        self.declare_parameter("navigation_speed", 1.0)
-        self.declare_parameter("waypoint_publish_rate", 5.0)
         self.declare_parameter("diagnostics_log_enabled", True)
         self.declare_parameter(
             "diagnostics_log_path",
@@ -65,20 +58,12 @@ class WaypointManagerNode(Node):
         self._odometry_origin_vertex = int(
             self.get_parameter("odometry_origin_vertex").value
         )
-        self._sync_origin_on_vertex_set = bool(
-            self.get_parameter("sync_odometry_origin_on_vertex_set").value
-        )
-        self._auto_start = bool(self.get_parameter("auto_start").value)
         self._legs_dir = self._resolve_legs_dir()
         self._vertices_file = self._resolve_vertices_file()
         self._vertex_positions: Dict[int, Tuple[float, float]] = {}
         self._load_vertex_config()
 
-        self._navigation_speed = float(self.get_parameter("navigation_speed").value)
-        publish_rate = float(self.get_parameter("waypoint_publish_rate").value)
-
         self._device_levels: Dict[str, int] = {name: 0 for name in DEVICE_NAMES}
-        self._last_statuses: list = []
         self._current_vertex = self._home_vertex
         self._route: List[int] = [self._home_vertex]
         self._route_target_vertex: Optional[int] = None
@@ -96,9 +81,7 @@ class WaypointManagerNode(Node):
         diag_qos = QoSProfile(
             depth=10,
             reliability=ReliabilityPolicy.RELIABLE,
-            durability=DurabilityPolicy.VOLATILE,
         )
-        marker_qos = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
 
         diagnostics_topic = str(self.get_parameter("diagnostics_topic").value)
         self.create_subscription(
@@ -109,19 +92,14 @@ class WaypointManagerNode(Node):
         waypoint_reached_topic = str(
             self.get_parameter("waypoint_reached_topic").value
         )
-        speed_topic = str(self.get_parameter("speed_topic").value)
         self._way_point_pub = self.create_publisher(PointStamped, way_point_topic, 5)
-        self._speed_pub = self.create_publisher(Float32, speed_topic, 5)
 
         self._route_pub = self.create_publisher(Int32MultiArray, "~/route", 10)
         self._current_vertex_pub = self.create_publisher(Int32, "~/current_vertex", 10)
-        self._marker_pub = self.create_publisher(MarkerArray, "~/markers", marker_qos)
-        self._queue_pub = self.create_publisher(Int32, "~/waypoint_count", 10)
         self._active_waypoint_index_pub = self.create_publisher(
             Int32, "~/active_waypoint_index", 10
         )
 
-        self.create_service(Trigger, "~/start", self._on_start)
         self.create_service(Trigger, "~/cancel", self._on_cancel)
         self.create_service(Trigger, "~/reload", self._on_reload)
 
@@ -129,14 +107,8 @@ class WaypointManagerNode(Node):
             Int32, "~/set_current_vertex", self._on_set_current_vertex, 10
         )
         self.create_subscription(
-            Int32, "~/set_odometry_origin", self._on_set_odometry_origin, 10
-        )
-        self.create_subscription(
             Int32, waypoint_reached_topic, self._on_waypoint_reached, 10
         )
-
-        period = 1.0 / publish_rate if publish_rate > 0.0 else 0.2
-        self.create_timer(period, self._navigation_tick)
 
         self._publish_current_vertex()
         self.get_logger().info(
@@ -219,29 +191,6 @@ class WaypointManagerNode(Node):
         self._publish_current_vertex()
         self.get_logger().info(f"Current vertex set to {vertex} (skip/manual).")
 
-        if self._sync_origin_on_vertex_set:
-            self._set_odometry_origin_vertex(vertex)
-
-    def _on_set_odometry_origin(self, msg: Int32) -> None:
-        self._set_odometry_origin_vertex(int(msg.data))
-
-    def _set_odometry_origin_vertex(self, vertex: int) -> None:
-        if vertex not in self._vertex_positions:
-            self.get_logger().error(
-                f"Invalid odometry_origin_vertex {vertex}; expected 1-4."
-            )
-            return
-
-        self._odometry_origin_vertex = vertex
-        ox, oy = self._autonomy_origin_xy()
-        self.get_logger().info(
-            f"Local origin vertex set to {vertex}; "
-            f"map offset=({ox:.3f}, {oy:.3f}). "
-            "Use after autonomy_stack_go2 restarts at that vertex."
-        )
-        if self._waypoints:
-            self._publish_markers()
-
     def _on_diagnostics(self, msg: DiagnosticArray) -> None:
         if self._diagnostics_logger is not None:
             stamp = msg.header.stamp
@@ -263,10 +212,7 @@ class WaypointManagerNode(Node):
                     f"(level={level}, vertex={vertex}); ignored."
                 )
 
-        self._last_statuses = list(msg.status)
-
-        if self._auto_start:
-            self._try_start_next_hop(self._last_statuses)
+        self._try_start_next_hop(list(msg.status))
 
     def _on_waypoint_reached(self, msg: Int32) -> None:
         if int(msg.data) != 1:
@@ -282,7 +228,6 @@ class WaypointManagerNode(Node):
         if self._active_waypoint_index + 1 < len(self._waypoints):
             self._active_waypoint_index += 1
             self._publish_active_waypoint_index()
-            self._publish_markers()
             self._publish_active_waypoint()
             self.get_logger().info(
                 f"Advanced to waypoint {self._active_waypoint_index + 1}/"
@@ -298,8 +243,6 @@ class WaypointManagerNode(Node):
             self._current_vertex = self._route_target_vertex
             self._route_target_vertex = None
             self._publish_current_vertex()
-        self._publish_markers()
-        self._publish_waypoint_count()
         self._publish_active_waypoint_index()
         self.get_logger().info(
             f"Completed hop {' -> '.join(str(v) for v in self._route)} "
@@ -348,12 +291,6 @@ class WaypointManagerNode(Node):
         )
         return True
 
-    def _navigation_tick(self) -> None:
-        if not self._waypoints:
-            return
-
-        self._publish_speed()
-
     def _publish_active_waypoint(self) -> None:
         if not self._waypoints:
             return
@@ -378,19 +315,12 @@ class WaypointManagerNode(Node):
             f"target=({wp_x:.3f}, {wp_y:.3f}, {msg.point.z:.3f})"
         )
 
-    def _publish_speed(self) -> None:
-        speed = Float32()
-        speed.data = float(self._navigation_speed)
-        self._speed_pub.publish(speed)
-
     def _load_route_waypoints(self) -> bool:
         pairs = route_to_leg_pairs(self._route)
         if not pairs:
             self._waypoints = []
             self._route_target_vertex = None
             self._active_waypoint_index = 0
-            self._publish_markers()
-            self._publish_waypoint_count()
             self._publish_active_waypoint_index()
             return False
 
@@ -403,8 +333,6 @@ class WaypointManagerNode(Node):
             self._waypoints = []
             self._route_target_vertex = None
             self._active_waypoint_index = 0
-            self._publish_markers()
-            self._publish_waypoint_count()
             self._publish_active_waypoint_index()
             return False
 
@@ -413,8 +341,6 @@ class WaypointManagerNode(Node):
         if len(self._route) >= 2:
             self._route_target_vertex = int(self._route[-1])
         self._frame_id = frame_id
-        self._publish_markers()
-        self._publish_waypoint_count()
         self._publish_active_waypoint_index()
         self._publish_active_waypoint()
         self.get_logger().info(
@@ -422,20 +348,6 @@ class WaypointManagerNode(Node):
             f"{' -> '.join(str(v) for v in self._route)}"
         )
         return True
-
-    def _on_start(self, _request: Trigger.Request, response: Trigger.Response) -> Trigger.Response:
-        if self._last_statuses:
-            started = self._try_start_next_hop(self._last_statuses)
-        elif self._load_route_waypoints():
-            started = True
-        else:
-            started = False
-
-        response.success = started
-        response.message = (
-            "Waypoint target started." if started else "No hop available to start."
-        )
-        return response
 
     def _on_cancel(self, _request: Trigger.Request, response: Trigger.Response) -> Trigger.Response:
         if not self._waypoints:
@@ -445,8 +357,6 @@ class WaypointManagerNode(Node):
         self._waypoints = []
         self._route_target_vertex = None
         self._active_waypoint_index = 0
-        self._publish_markers()
-        self._publish_waypoint_count()
         self._publish_active_waypoint_index()
         response.success = True
         response.message = "Waypoint target cancelled."
@@ -472,52 +382,10 @@ class WaypointManagerNode(Node):
         msg.data = int(self._current_vertex)
         self._current_vertex_pub.publish(msg)
 
-    def _publish_waypoint_count(self) -> None:
-        msg = Int32()
-        msg.data = len(self._waypoints)
-        self._queue_pub.publish(msg)
-
     def _publish_active_waypoint_index(self) -> None:
         msg = Int32()
         msg.data = int(self._active_waypoint_index) if self._waypoints else -1
         self._active_waypoint_index_pub.publish(msg)
-
-    def _publish_markers(self) -> None:
-        markers = MarkerArray()
-        for idx, wp in enumerate(self._waypoints):
-            wp_x, wp_y = self._map_to_autonomy_xy(
-                wp.pose.position.x, wp.pose.position.y
-            )
-            marker = Marker()
-            marker.header.frame_id = wp.header.frame_id or self._frame_id
-            marker.header.stamp = self.get_clock().now().to_msg()
-            marker.ns = "waypoint_manager"
-            marker.id = idx
-            marker.type = Marker.ARROW
-            marker.action = Marker.ADD
-            marker.pose = deepcopy(wp.pose)
-            marker.pose.position.x = wp_x
-            marker.pose.position.y = wp_y
-            marker.scale.x = 0.45
-            marker.scale.y = 0.08
-            marker.scale.z = 0.08
-            if idx == self._active_waypoint_index:
-                marker.color.r = 0.1
-                marker.color.g = 0.75
-                marker.color.b = 0.25
-            else:
-                marker.color.r = 0.95
-                marker.color.g = 0.55
-                marker.color.b = 0.1
-            marker.color.a = 0.95
-            markers.markers.append(marker)
-
-        if not self._waypoints:
-            delete_all = Marker()
-            delete_all.action = Marker.DELETEALL
-            markers.markers = [delete_all]
-
-        self._marker_pub.publish(markers)
 
 
 def main(args: Optional[List[str]] = None) -> None:

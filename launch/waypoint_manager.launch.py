@@ -22,17 +22,12 @@ def generate_launch_description():
             default_value=default_vertices,
             description="YAML with map-frame coordinates for vertices 1-4.",
         ),
-        DeclareLaunchArgument("auto_start", default_value="true"),
         DeclareLaunchArgument(
             "home_vertex",
             default_value="1",
             description="Initial logical vertex where the robot starts.",
         ),
         DeclareLaunchArgument("odometry_origin_vertex", default_value="1"),
-        DeclareLaunchArgument(
-            "sync_odometry_origin_on_vertex_set",
-            default_value="false",
-        ),
         DeclareLaunchArgument("diagnostics_log_enabled", default_value="true"),
         DeclareLaunchArgument(
             "way_point_topic",
@@ -44,11 +39,6 @@ def generate_launch_description():
             default_value="/waypoint_manager/waypoint_reached",
             description="Int32 completion signal topic; publish data=1 to advance to the next waypoint.",
         ),
-        DeclareLaunchArgument(
-            "speed_topic",
-            default_value="/speed",
-            description="autonomy_stack_go2 speed topic.",
-        ),
         Node(
             package="waypoint_manager",
             executable="waypoint_manager_node",
@@ -57,13 +47,9 @@ def generate_launch_description():
             parameters=[{
                 "legs_dir": LaunchConfiguration("legs_dir"),
                 "vertices_file": LaunchConfiguration("vertices_file"),
-                "auto_start": LaunchConfiguration("auto_start"),
                 "home_vertex": LaunchConfiguration("home_vertex"),
                 "odometry_origin_vertex": LaunchConfiguration(
                     "odometry_origin_vertex"
-                ),
-                "sync_odometry_origin_on_vertex_set": LaunchConfiguration(
-                    "sync_odometry_origin_on_vertex_set"
                 ),
                 "diagnostics_log_enabled": LaunchConfiguration(
                     "diagnostics_log_enabled"
@@ -72,7 +58,6 @@ def generate_launch_description():
                 "waypoint_reached_topic": LaunchConfiguration(
                     "waypoint_reached_topic"
                 ),
-                "speed_topic": LaunchConfiguration("speed_topic"),
             }],
         ),
     ])
