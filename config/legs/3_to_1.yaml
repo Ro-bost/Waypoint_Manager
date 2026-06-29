@@ -1,0 +1,6 @@
+# Placeholder leg: vertex 3 -> vertex 1 (diagonal return)
+frame_id: map
+waypoints:
+  - x: 0.0
+    y: 0.0
+    yaw: 0.0
