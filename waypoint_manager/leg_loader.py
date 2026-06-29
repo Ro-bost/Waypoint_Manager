@@ -113,11 +113,14 @@ def yaw_to_quat(yaw: float) -> Quaternion:
     return q
 
 
-def pose_from_xy_yaw(frame_id: str, x: float, y: float, yaw: float) -> PoseStamped:
+def pose_from_xyz_yaw(
+    frame_id: str, x: float, y: float, z: float, yaw: float
+) -> PoseStamped:
     pose = PoseStamped()
     pose.header.frame_id = frame_id
     pose.pose.position.x = x
     pose.pose.position.y = y
+    pose.pose.position.z = z
     pose.pose.orientation = yaw_to_quat(yaw)
     return pose
 
@@ -142,10 +145,11 @@ def load_leg_file(path: Path, default_frame_id: str) -> Tuple[str, List[PoseStam
         try:
             x = float(entry["x"])
             y = float(entry["y"])
+            z = float(entry.get("z", 0.0))
             yaw = float(entry.get("yaw", 0.0))
         except (KeyError, TypeError, ValueError) as exc:
             raise ValueError(f"Invalid waypoint #{idx + 1} in {path}: {exc}") from exc
-        poses.append(pose_from_xy_yaw(frame_id, x, y, yaw))
+        poses.append(pose_from_xyz_yaw(frame_id, x, y, z, yaw))
 
     return frame_id, poses
 

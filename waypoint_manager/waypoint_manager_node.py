@@ -54,7 +54,7 @@ class WaypointManagerNode(Node):
         self.declare_parameter("auto_start", True)
 
         # autonomy_stack_go2 (https://github.com/jizhang-cmu/autonomy_stack_go2)
-        self.declare_parameter("way_point_topic", "/way_point")
+        self.declare_parameter("way_point_topic", "/waypoint_manager/target_waypoint")
         self.declare_parameter("state_estimation_topic", "/state_estimation")
         self.declare_parameter("speed_topic", "/speed")
         self.declare_parameter("navigation_speed", 1.0)

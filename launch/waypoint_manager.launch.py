@@ -31,8 +31,13 @@ def generate_launch_description():
         DeclareLaunchArgument("diagnostics_log_enabled", default_value="true"),
         DeclareLaunchArgument(
             "way_point_topic",
-            default_value="/way_point",
-            description="autonomy_stack_go2 waypoint topic.",
+            default_value="/waypoint_manager/target_waypoint",
+            description="Waypoint_Manager target topic consumed by run_relative_waypoint_sequence.py.",
+        ),
+        DeclareLaunchArgument(
+            "speed_topic",
+            default_value="/speed",
+            description="autonomy_stack_go2 speed topic.",
         ),
         DeclareLaunchArgument(
             "state_estimation_topic",
@@ -58,6 +63,7 @@ def generate_launch_description():
                     "diagnostics_log_enabled"
                 ),
                 "way_point_topic": LaunchConfiguration("way_point_topic"),
+                "speed_topic": LaunchConfiguration("speed_topic"),
                 "state_estimation_topic": LaunchConfiguration(
                     "state_estimation_topic"
                 ),
